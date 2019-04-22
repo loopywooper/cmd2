@@ -30,7 +30,6 @@ Git repository on GitHub at https://github.com/python-cmd2/cmd2
 # until the perror() function is called and the debug
 # setting is True
 import argparse
-import cmd
 import glob
 import inspect
 import os
@@ -302,8 +301,10 @@ class EmptyStatement(Exception):
 # Contains data about a disabled command which is used to restore its original functions when the command is enabled
 DisabledCommand = namedtuple('DisabledCommand', ['command_function', 'help_function'])
 
+PROMPT = '(Cmd) '
 
-class Cmd(cmd.Cmd):
+
+class Cmd(object):
     """An easy but powerful framework for writing line-oriented command interpreters.
 
     Extends the Python Standard Library’s cmd package by adding a lot of useful features
@@ -313,6 +314,16 @@ class Cmd(cmd.Cmd):
     """
     DEFAULT_SHORTCUTS = {'?': 'help', '!': 'shell', '@': 'load', '@@': '_relative_load'}
     DEFAULT_EDITOR = utils.find_editor()
+
+    prompt = PROMPT
+    ruler = '='
+    lastcmd = ''
+    intro = None
+    doc_leader = ""
+    doc_header = "Documented commands (type help <topic>):"
+    misc_header = "Miscellaneous help topics:"
+    undoc_header = "Undocumented commands:"
+    use_rawinput = 1
 
     def __init__(self, completekey: str = 'tab', stdin=None, stdout=None, persistent_history_file: str = '',
                  persistent_history_length: int = 1000, startup_script: Optional[str] = None, use_ipython: bool = False,
@@ -347,8 +358,26 @@ class Cmd(cmd.Cmd):
         # needs to be done before we call __init__(0)
         self._initialize_plugin_system()
 
-        # Call super class constructor
-        super().__init__(completekey=completekey, stdin=stdin, stdout=stdout)
+        """Instantiate a line-oriented interpreter framework.
+
+        The optional argument 'completekey' is the readline name of a
+        completion key; it defaults to the Tab key. If completekey is
+        not None and the readline module is available, command completion
+        is done automatically. The optional arguments stdin and stdout
+        specify alternate input and output file objects; if not specified,
+        sys.stdin and sys.stdout are used.
+
+        """
+        if stdin is not None:
+            self.stdin = stdin
+        else:
+            self.stdin = sys.stdin
+        if stdout is not None:
+            self.stdout = stdout
+        else:
+            self.stdout = sys.stdout
+        self.cmdqueue = []
+        self.completekey = completekey
 
         # Attributes which should NOT be dynamically settable at runtime
         self.allow_cli_args = True  # Should arguments passed on the command-line be processed as commands?
@@ -1363,6 +1392,110 @@ class Cmd(cmd.Cmd):
             orig_pyreadline_display(matches_to_display)
 
     # -----  Methods which override stuff in cmd -----
+
+    def postcmd(self, stop, line):
+        """Hook method executed just after a command dispatch is finished."""
+        return stop
+
+    def preloop(self):
+        """Hook method executed once when the cmdloop() method is called."""
+        pass
+
+    def postloop(self):
+        """Hook method executed once when the cmdloop() method is about to
+        return.
+
+        """
+        pass
+
+    def emptyline(self):
+        """Called when an empty line is entered in response to the prompt.
+
+        If this method is not overridden, it repeats the last nonempty
+        command entered.
+
+        """
+        if self.lastcmd:
+            return self.onecmd(self.lastcmd)
+
+    def completedefault(self, *ignored):
+        """Method called to complete an input line when no command-specific
+        complete_*() method is available.
+
+        By default, it returns an empty list.
+
+        """
+        return []
+
+    def get_names(self):
+        # This method used to pull in base class attributes
+        # at a time dir() didn't do it yet.
+        return dir(self.__class__)
+
+    def print_topics(self, header, cmds, cmdlen, maxcol):
+        if cmds:
+            self.stdout.write("%s\n"%str(header))
+            if self.ruler:
+                self.stdout.write("%s\n"%str(self.ruler * len(header)))
+            self.columnize(cmds, maxcol-1)
+            self.stdout.write("\n")
+
+    def columnize(self, list, displaywidth=80):
+        """Display a list of strings as a compact set of columns.
+
+        Each column is only as wide as necessary.
+        Columns are separated by two spaces (one was not legible enough).
+        """
+        if not list:
+            self.stdout.write("<empty>\n")
+            return
+
+        nonstrings = [i for i in range(len(list))
+                        if not isinstance(list[i], str)]
+        if nonstrings:
+            raise TypeError("list[i] not a string for i in %s"
+                            % ", ".join(map(str, nonstrings)))
+        size = len(list)
+        if size == 1:
+            self.stdout.write('%s\n'%str(list[0]))
+            return
+        # Try every row count from 1 upwards
+        for nrows in range(1, len(list)):
+            ncols = (size+nrows-1) // nrows
+            colwidths = []
+            totwidth = -2
+            for col in range(ncols):
+                colwidth = 0
+                for row in range(nrows):
+                    i = row + nrows*col
+                    if i >= size:
+                        break
+                    x = list[i]
+                    colwidth = max(colwidth, len(x))
+                colwidths.append(colwidth)
+                totwidth += colwidth + 2
+                if totwidth > displaywidth:
+                    break
+            if totwidth <= displaywidth:
+                break
+        else:
+            nrows = len(list)
+            ncols = 1
+            colwidths = [0]
+        for row in range(nrows):
+            texts = []
+            for col in range(ncols):
+                i = row + nrows*col
+                if i >= size:
+                    x = ""
+                else:
+                    x = list[i]
+                texts.append(x)
+            while texts and not texts[-1]:
+                del texts[-1]
+            for col in range(len(texts)):
+                texts[col] = texts[col].ljust(colwidths[col])
+            self.stdout.write("%s\n"%str("  ".join(texts)))
 
     def complete(self, text: str, state: int) -> Optional[str]:
         """Override of command method which returns the next possible completion for 'text'.
@@ -2629,10 +2762,6 @@ class Cmd(cmd.Cmd):
     help_parser.add_argument('-v', '--verbose', action='store_true',
                              help="print a list of all commands with descriptions of each")
 
-    # Get rid of cmd's complete_help() functions so AutoCompleter will complete the help command
-    if getattr(cmd.Cmd, 'complete_help', None) is not None:
-        delattr(cmd.Cmd, 'complete_help')
-
     @with_argparser(help_parser)
     def do_help(self, args: argparse.Namespace) -> None:
         """List available commands or provide detailed help for a specific command"""
@@ -2650,14 +2779,19 @@ class Cmd(cmd.Cmd):
                 tokens = [args.command] + args.subcommand
                 self.poutput(completer.format_help(tokens))
 
-            # If there is no help information then print an error
-            elif help_func is None and (func is None or not func.__doc__):
+            # If there is a help_ function
+            elif help_func is not None:
+                return help_func()
+
+            # If there is a doc string for func
+            elif func is not None and func.__doc__:
+                self.stdout.write("{}\n".format(func.__doc__))
+                return
+
+            # else, there is no help information, print an error
+            else:
                 err_msg = self.help_error.format(args.command)
                 self.decolorized_write(sys.stderr, "{}\n".format(err_msg))
-
-            # Otherwise delegate to cmd base class do_help()
-            else:
-                super().do_help(args.command)
 
     def _help_menu(self, verbose: bool = False) -> None:
         """Show a list of commands which help can be displayed for.
