@@ -124,60 +124,8 @@ elif 'gnureadline' in sys.modules or 'readline' in sys.modules:
             vt100_support = True
 
 
-# noinspection PyProtectedMember,PyUnresolvedReferences
-def rl_force_redisplay() -> None:  # pragma: no cover
-    """
-    Causes readline to display the prompt and input text wherever the cursor is and start
-    reading input from this location. This is the proper way to restore the input line after
-    printing to the screen
-    """
-    if not sys.stdout.isatty():
-        return
-
-    if rl_type == RlType.GNU:
-        readline_lib.rl_forced_update_display()
-
-        # After manually updating the display, readline asks that rl_display_fixed be set to 1 for efficiency
-        display_fixed = ctypes.c_int.in_dll(readline_lib, "rl_display_fixed")
-        display_fixed.value = 1
-
-    elif rl_type == RlType.PYREADLINE:
-        # Call _print_prompt() first to set the new location of the prompt
-        readline.rl.mode._print_prompt()
-        readline.rl.mode._update_line()
-
-
-# noinspection PyProtectedMember, PyUnresolvedReferences
-def rl_get_point() -> int:  # pragma: no cover
-    """
-    Returns the offset of the current cursor position in rl_line_buffer
-    """
-    if rl_type == RlType.GNU:
-        return ctypes.c_int.in_dll(readline_lib, "rl_point").value
-
-    elif rl_type == RlType.PYREADLINE:
-        return readline.rl.mode.l_buffer.point
-
-    else:
-        return 0
-
-
-# noinspection PyProtectedMember, PyUnresolvedReferences
-def rl_set_prompt(prompt: str) -> None:  # pragma: no cover
-    """
-    Sets readline's prompt
-    :param prompt: the new prompt value
-    """
-    safe_prompt = rl_make_safe_prompt(prompt)
-
-    if rl_type == RlType.GNU:
-        encoded_prompt = bytes(safe_prompt, encoding='utf-8')
-        readline_lib.rl_set_prompt(encoded_prompt)
-
-    elif rl_type == RlType.PYREADLINE:
-        readline.rl._set_prompt(safe_prompt)
-
-
+# TODO: this needs to be replaced for its use in select()
+# just make a separate prompt session
 def rl_make_safe_prompt(prompt: str) -> str:  # pragma: no cover
     """Overcome bug in GNU Readline in relation to calculation of prompt length in presence of ANSI escape codes.
 

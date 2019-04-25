@@ -71,7 +71,6 @@ from typing import List, Dict, Tuple, Callable, Union
 
 from colorama import Fore
 
-from .rl_utils import rl_force_redisplay
 from .utils import ansi_safe_wcswidth
 
 # attribute that can optionally added to an argparse argument (called an Action) to
@@ -779,9 +778,6 @@ class AutoCompleter(object):
             out_str = '\n{}'.format(prefix)
             out_str += '\n{0: <{width}}'.format('', width=pref_len).join(help_lines)
             print('\nHint:' + out_str + '\n')
-
-        # Redraw prompt and input line
-        rl_force_redisplay()
 
 
 ###############################################################################

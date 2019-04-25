@@ -45,6 +45,8 @@ from colorama import Fore
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit import PromptSession
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.formatted_text import ANSI
 
 from . import constants
 from . import plugin
@@ -55,7 +57,7 @@ from .history import History, HistoryItem
 from .parsing import StatementParser, Statement, Macro, MacroArg, shlex_split
 
 # Set up readline
-from .rl_utils import rl_type, RlType, rl_get_point, rl_set_prompt, vt100_support, rl_make_safe_prompt
+from .rl_utils import rl_type, RlType, vt100_support, rl_make_safe_prompt
 
 if rl_type == RlType.NONE:  # pragma: no cover
     rl_warning = "Readline features including tab completion have been disabled since no \n" \
@@ -63,7 +65,7 @@ if rl_type == RlType.NONE:  # pragma: no cover
                  "pyreadline on Windows or gnureadline on Mac.\n\n"
     sys.stderr.write(Fore.LIGHTYELLOW_EX + rl_warning + Fore.RESET)
 else:
-    from .rl_utils import rl_force_redisplay, readline
+    from .rl_utils import readline
 
     # Used by rlcompleter in Python console loaded by py command
     orig_rl_delims = readline.get_completer_delims()
@@ -392,8 +394,10 @@ class Cmd(object):
         self.cmdqueue = []
         self.completekey = completekey
 
-        self.prompt_session = PromptSession(complete_style=CompleteStyle.READLINE_LIKE,
-                                            completer=MyCompleter(self))
+        self.prompt_session = PromptSession(self.get_prompt,
+                                            complete_style=CompleteStyle.READLINE_LIKE,
+                                            completer=MyCompleter(self),
+                                            refresh_interval=0.5)
 
         # Attributes which should NOT be dynamically settable at runtime
         self.allow_cli_args = True  # Should arguments passed on the command-line be processed as commands?
@@ -590,6 +594,15 @@ class Cmd(object):
 
     # -----  Methods related to presenting output to the user -----
 
+    def get_prompt(self):
+        """Simply get the current prompt converted to ANSI formatted text object.
+        Prompt toolkit needs a callable object to refresh the prompt. This allows a user
+        to simply modify self.prompt.
+
+        :return: ANSI text formatted object of the current prompt
+        """
+        return ANSI(self.prompt)
+
     @property
     def visible_prompt(self) -> str:
         """Read-only property to get the visible prompt with any ANSI escape codes stripped.
@@ -751,6 +764,7 @@ class Cmd(object):
 
     # -----  Methods related to tab completion -----
 
+    # TODO: we might need to reset these ourselves
     def reset_completion_defaults(self) -> None:
         """
         Resets tab completion settings
@@ -758,16 +772,11 @@ class Cmd(object):
         """
         self.allow_appended_space = True
         self.allow_closing_quote = True
+        # TODO: need to figure out how this is used
         self.completion_header = ''
         self.display_matches = []
         self.matches_delimited = False
         self.matches_sorted = False
-
-        if rl_type == RlType.GNU:
-            readline.set_completion_display_matches_hook(self._display_matches_gnu_readline)
-        elif rl_type == RlType.PYREADLINE:
-            # noinspection PyUnresolvedReferences
-            readline.rl.mode._display_completions = self._display_matches_pyreadline
 
     def tokens_for_completion(self, line: str, begidx: int, endidx: int) -> Tuple[List[str], List[str]]:
         """
@@ -1301,108 +1310,6 @@ class Cmd(object):
 
         # Call the command's completer function
         return compfunc(text, line, begidx, endidx)
-
-    @staticmethod
-    def _pad_matches_to_display(matches_to_display: List[str]) -> Tuple[List[str], int]:  # pragma: no cover
-        """Adds padding to the matches being displayed as tab completion suggestions.
-        The default padding of readline/pyreadine is small and not visually appealing
-        especially if matches have spaces. It appears very squished together.
-
-        :param matches_to_display: the matches being padded
-        :return: the padded matches and length of padding that was added
-        """
-        if rl_type == RlType.GNU:
-            # Add 2 to the padding of 2 that readline uses for a total of 4.
-            padding = 2 * ' '
-
-        elif rl_type == RlType.PYREADLINE:
-            # Add 3 to the padding of 1 that pyreadline uses for a total of 4.
-            padding = 3 * ' '
-
-        else:
-            return matches_to_display, 0
-
-        return [cur_match + padding for cur_match in matches_to_display], len(padding)
-
-    def _display_matches_gnu_readline(self, substitution: str, matches: List[str],
-                                      longest_match_length: int) -> None:  # pragma: no cover
-        """Prints a match list using GNU readline's rl_display_match_list()
-        This exists to print self.display_matches if it has data. Otherwise matches prints.
-
-        :param substitution: the substitution written to the command line
-        :param matches: the tab completion matches to display
-        :param longest_match_length: longest printed length of the matches
-        """
-        if rl_type == RlType.GNU:
-
-            # Check if we should show display_matches
-            if self.display_matches:
-                matches_to_display = self.display_matches
-
-                # Recalculate longest_match_length for display_matches
-                longest_match_length = 0
-
-                for cur_match in matches_to_display:
-                    cur_length = utils.ansi_safe_wcswidth(cur_match)
-                    if cur_length > longest_match_length:
-                        longest_match_length = cur_length
-            else:
-                matches_to_display = matches
-
-            # Add padding for visual appeal
-            matches_to_display, padding_length = self._pad_matches_to_display(matches_to_display)
-            longest_match_length += padding_length
-
-            # We will use readline's display function (rl_display_match_list()), so we
-            # need to encode our string as bytes to place in a C array.
-            encoded_substitution = bytes(substitution, encoding='utf-8')
-            encoded_matches = [bytes(cur_match, encoding='utf-8') for cur_match in matches_to_display]
-
-            # rl_display_match_list() expects matches to be in argv format where
-            # substitution is the first element, followed by the matches, and then a NULL.
-            # noinspection PyCallingNonCallable,PyTypeChecker
-            strings_array = (ctypes.c_char_p * (1 + len(encoded_matches) + 1))()
-
-            # Copy in the encoded strings and add a NULL to the end
-            strings_array[0] = encoded_substitution
-            strings_array[1:-1] = encoded_matches
-            strings_array[-1] = None
-
-            # Print the header if one exists
-            if self.completion_header:
-                sys.stdout.write('\n' + self.completion_header)
-
-            # Call readline's display function
-            # rl_display_match_list(strings_array, number of completion matches, longest match length)
-            readline_lib.rl_display_match_list(strings_array, len(encoded_matches), longest_match_length)
-
-            # Redraw prompt and input line
-            rl_force_redisplay()
-
-    def _display_matches_pyreadline(self, matches: List[str]) -> None:  # pragma: no cover
-        """Prints a match list using pyreadline's _display_completions()
-        This exists to print self.display_matches if it has data. Otherwise matches prints.
-
-        :param matches: the tab completion matches to display
-        """
-        if rl_type == RlType.PYREADLINE:
-
-            # Check if we should show display_matches
-            if self.display_matches:
-                matches_to_display = self.display_matches
-            else:
-                matches_to_display = matches
-
-            # Add padding for visual appeal
-            matches_to_display, _ = self._pad_matches_to_display(matches_to_display)
-
-            # Print the header if one exists
-            if self.completion_header:
-                # noinspection PyUnresolvedReferences
-                readline.rl.mode.console.write('\n' + self.completion_header)
-
-            # Display matches using actual display function. This also redraws the prompt and line.
-            orig_pyreadline_display(matches_to_display)
 
     # -----  Methods which override stuff in cmd -----
 
@@ -2275,12 +2182,12 @@ class Cmd(object):
                     except RuntimeError:
                         pass
 
-                    # Deal with the vagaries of readline and ANSI escape codes
-                    safe_prompt = rl_make_safe_prompt(prompt)
-                    line = self.prompt_session.prompt(prompt)
+                    with patch_stdout():
+                        line = self.prompt_session.prompt()
                 else:
                     # TODO: should this just be input??
-                    line = self.prompt_session.prompt()
+                    #line = self.prompt_session.prompt()
+                    line = input()
                     if self.echo:
                         sys.stdout.write('{}{}\n'.format(prompt, line))
             except EOFError:
@@ -3774,62 +3681,11 @@ class Cmd(object):
 
                 # If we aren't at a continuation prompt, then it's OK to update it
                 if not self.at_continuation_prompt:
-                    rl_set_prompt(self.prompt)
                     update_terminal = True
 
+            # TODO: not sure why this was using sterr for GNU readline
             if update_terminal:
-                # Get the size of the terminal
-                terminal_size = shutil.get_terminal_size()
-
-                # Split the prompt lines since it can contain newline characters.
-                prompt_lines = current_prompt.splitlines()
-
-                # Calculate how many terminal lines are taken up by all prompt lines except for the last one.
-                # That will be included in the input lines calculations since that is where the cursor is.
-                num_prompt_terminal_lines = 0
-                for line in prompt_lines[:-1]:
-                    line_width = utils.ansi_safe_wcswidth(line)
-                    num_prompt_terminal_lines += int(line_width / terminal_size.columns) + 1
-
-                # Now calculate how many terminal lines are take up by the input
-                last_prompt_line = prompt_lines[-1]
-                last_prompt_line_width = utils.ansi_safe_wcswidth(last_prompt_line)
-
-                input_width = last_prompt_line_width + utils.ansi_safe_wcswidth(readline.get_line_buffer())
-
-                num_input_terminal_lines = int(input_width / terminal_size.columns) + 1
-
-                # Get the cursor's offset from the beginning of the first input line
-                cursor_input_offset = last_prompt_line_width + rl_get_point()
-
-                # Calculate what input line the cursor is on
-                cursor_input_line = int(cursor_input_offset / terminal_size.columns) + 1
-
-                # Create a string that when printed will clear all input lines and display the alert
-                terminal_str = ''
-
-                # Move the cursor down to the last input line
-                if cursor_input_line != num_input_terminal_lines:
-                    terminal_str += Cursor.DOWN(num_input_terminal_lines - cursor_input_line)
-
-                # Clear each line from the bottom up so that the cursor ends up on the first prompt line
-                total_lines = num_prompt_terminal_lines + num_input_terminal_lines
-                terminal_str += (ansi.clear_line() + Cursor.UP(1)) * (total_lines - 1)
-
-                # Clear the first prompt line
-                terminal_str += ansi.clear_line()
-
-                # Move the cursor to the beginning of the first prompt line and print the alert
-                terminal_str += '\r' + alert_msg
-
-                if rl_type == RlType.GNU:
-                    sys.stderr.write(terminal_str)
-                elif rl_type == RlType.PYREADLINE:
-                    # noinspection PyUnresolvedReferences
-                    readline.rl.mode.console.write(terminal_str)
-
-                # Redraw the prompt and input lines
-                rl_force_redisplay()
+                print(alert_msg, end='')
 
             self.terminal_lock.release()
 
