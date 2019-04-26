@@ -44,7 +44,7 @@ from colorama import Fore
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit import PromptSession
-from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.shortcuts import CompleteStyle, set_title
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.formatted_text import ANSI
 
@@ -57,7 +57,7 @@ from .history import History, HistoryItem
 from .parsing import StatementParser, Statement, Macro, MacroArg, shlex_split
 
 # Set up readline
-from .rl_utils import rl_type, RlType, vt100_support, rl_make_safe_prompt
+from .rl_utils import rl_type, RlType, rl_make_safe_prompt
 
 if rl_type == RlType.NONE:  # pragma: no cover
     rl_warning = "Readline features including tab completion have been disabled since no \n" \
@@ -394,7 +394,7 @@ class Cmd(object):
         self.cmdqueue = []
         self.completekey = completekey
 
-        self.prompt_session = PromptSession(self.get_prompt,
+        self.prompt_session = PromptSession(message=self.get_prompt,
                                             complete_style=CompleteStyle.READLINE_LIKE,
                                             completer=MyCompleter(self),
                                             refresh_interval=0.5)
@@ -3352,7 +3352,7 @@ class Cmd(object):
             self.history.clear()
 
             if rl_type != RlType.NONE:
-                readline.clear_history()
+                #readline.clear_history()
                 if self.persistent_history_file:
                     os.remove(self.persistent_history_file)
             return
@@ -3655,12 +3655,8 @@ class Cmd(object):
                            see async_update_prompt() docstring for guidance on updating a prompt
         :raises RuntimeError if called while another thread holds terminal_lock
         """
-        if not (vt100_support and self.use_rawinput):
+        if not self.use_rawinput:
             return
-
-        import shutil
-        import colorama.ansi as ansi
-        from colorama import Cursor
 
         # Sanity check that can't fail if self.terminal_lock was acquired before calling this function
         if self.terminal_lock.acquire(blocking=False):
@@ -3717,6 +3713,7 @@ class Cmd(object):
         """
         Set the terminal window title
 
+        TODO: fix this
         IMPORTANT: This function will not set the title unless it can acquire self.terminal_lock to avoid
                    writing to stderr while a command is running. Therefore it is best to acquire the lock
                    before calling this function to guarantee the title changes.
@@ -3724,17 +3721,10 @@ class Cmd(object):
         :param title: the new window title
         :raises RuntimeError if called while another thread holds terminal_lock
         """
-        if not vt100_support:
-            return
-
         # Sanity check that can't fail if self.terminal_lock was acquired before calling this function
         if self.terminal_lock.acquire(blocking=False):
             try:
-                import colorama.ansi as ansi
-                sys.stderr.write(ansi.set_title(title))
-            except AttributeError:
-                # Debugging in Pycharm has issues with setting terminal title
-                pass
+                set_title(title)
             finally:
                 self.terminal_lock.release()
 

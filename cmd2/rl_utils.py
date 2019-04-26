@@ -29,9 +29,6 @@ class RlType(Enum):
 # Check what implementation of readline we are using
 rl_type = RlType.NONE
 
-# Tells if the terminal we are running in supports vt100 control characters
-vt100_support = False
-
 # The order of this check matters since importing pyreadline will also show readline in the modules list
 if 'pyreadline' in sys.modules:
     rl_type = RlType.PYREADLINE
@@ -118,10 +115,6 @@ elif 'gnureadline' in sys.modules or 'readline' in sys.modules:
         # Load the readline lib so we can access members of it
         import ctypes
         readline_lib = ctypes.CDLL(readline.__file__)
-
-        # Check if we are running in a terminal
-        if sys.stdout.isatty():
-            vt100_support = True
 
 
 # TODO: this needs to be replaced for its use in select()
