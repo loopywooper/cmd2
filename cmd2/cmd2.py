@@ -43,7 +43,7 @@ import colorama
 from colorama import Fore
 
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit import PromptSession
+from prompt_toolkit import PromptSession, prompt
 from prompt_toolkit.shortcuts import CompleteStyle, set_title
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.formatted_text import ANSI
@@ -55,35 +55,6 @@ from .argparse_completer import AutoCompleter, ACArgumentParser, ACTION_ARG_CHOI
 from .clipboard import can_clip, get_paste_buffer, write_to_paste_buffer
 from .history import History, HistoryItem
 from .parsing import StatementParser, Statement, Macro, MacroArg, shlex_split
-
-# Set up readline
-from .rl_utils import rl_type, RlType, rl_make_safe_prompt
-
-if rl_type == RlType.NONE:  # pragma: no cover
-    rl_warning = "Readline features including tab completion have been disabled since no \n" \
-                 "supported version of readline was found. To resolve this, install \n" \
-                 "pyreadline on Windows or gnureadline on Mac.\n\n"
-    sys.stderr.write(Fore.LIGHTYELLOW_EX + rl_warning + Fore.RESET)
-else:
-    from .rl_utils import readline
-
-    # Used by rlcompleter in Python console loaded by py command
-    orig_rl_delims = readline.get_completer_delims()
-
-    if rl_type == RlType.PYREADLINE:
-
-        # Save the original pyreadline display completion function since we need to override it and restore it
-        # noinspection PyProtectedMember,PyUnresolvedReferences
-        orig_pyreadline_display = readline.rl.mode._display_completions
-
-    elif rl_type == RlType.GNU:
-
-        # Get the readline lib so we can make changes to it
-        import ctypes
-        from .rl_utils import readline_lib
-
-        rl_basic_quote_characters = ctypes.c_char_p.in_dll(readline_lib, "rl_basic_quote_characters")
-        orig_rl_basic_quotes = ctypes.cast(rl_basic_quote_characters, ctypes.c_void_p).value
 
 # Collection is a container that is sizable and iterable
 # It was introduced in Python 3.6. We will try to import it, otherwise use our implementation
@@ -149,7 +120,17 @@ class MyCompleter(Completer):
         self.cmd = cmd
 
     def get_completions(self, document, complete_event):
-        for c in self.cmd.complete(document):
+        completions = self.cmd.complete(document)
+        if self.cmd.display_matches:
+            completions = self.cmd.display_matches
+
+        # TODO: need to overwrite the display function that tab uses
+        # to get this to display above matches
+        # Print the header if one exists
+        if self.cmd.completion_header:
+            pass
+
+        for c in completions:
             yield Completion(c, document.find_boundaries_of_current_word()[0])
 
 
@@ -489,37 +470,11 @@ class Cmd(object):
         # If this string is non-empty, then this warning message will print if a broken pipe error occurs while printing
         self.broken_pipe_warning = ''
 
+        # TODO
         # Check if history should persist
         self.persistent_history_file = ''
-        if persistent_history_file and rl_type != RlType.NONE:
-            persistent_history_file = os.path.expanduser(persistent_history_file)
-            read_err = False
-
-            try:
-                # First try to read any existing history file
-                readline.read_history_file(persistent_history_file)
-            except FileNotFoundError:
-                pass
-            except OSError as ex:
-                self.perror("readline cannot read persistent history file '{}': {}".format(persistent_history_file, ex),
-                            traceback_war=False)
-                read_err = True
-
-            if not read_err:
-                try:
-                    # Make sure readline is able to write the history file. Doing it this way is a more thorough check
-                    # than trying to open the file with write access since readline's underlying function needs to
-                    # create a temporary file in the same directory and may not have permission.
-                    readline.set_history_length(persistent_history_length)
-                    readline.write_history_file(persistent_history_file)
-                except OSError as ex:
-                    self.perror("readline cannot write persistent history file '{}': {}".
-                                format(persistent_history_file, ex), traceback_war=False)
-                else:
-                    # Set history file and register to save our history at exit
-                    import atexit
-                    self.persistent_history_file = persistent_history_file
-                    atexit.register(readline.write_history_file, self.persistent_history_file)
+        if persistent_history_file:
+            pass
 
         # If a startup script is provided, then add it in the queue to load
         if startup_script is not None:
@@ -764,7 +719,6 @@ class Cmd(object):
 
     # -----  Methods related to tab completion -----
 
-    # TODO: we might need to reset these ourselves
     def reset_completion_defaults(self) -> None:
         """
         Resets tab completion settings
@@ -1354,9 +1308,9 @@ class Cmd(object):
 
     def print_topics(self, header, cmds, cmdlen, maxcol):
         if cmds:
-            self.stdout.write("%s\n"%str(header))
+            self.stdout.write("%s\n" % str(header))
             if self.ruler:
-                self.stdout.write("%s\n"%str(self.ruler * len(header)))
+                self.stdout.write("%s\n" % str(self.ruler * len(header)))
             self.columnize(cmds, maxcol-1)
             self.stdout.write("\n")
 
@@ -1377,7 +1331,7 @@ class Cmd(object):
                             % ", ".join(map(str, nonstrings)))
         size = len(list)
         if size == 1:
-            self.stdout.write('%s\n'%str(list[0]))
+            self.stdout.write('%s\n'% str(list[0]))
             return
         # Try every row count from 1 upwards
         for nrows in range(1, len(list)):
@@ -1434,6 +1388,7 @@ class Cmd(object):
         import functools
 
         unclosed_quote = ''
+        self.reset_completion_defaults()
 
         # lstrip the original line
         orig_line = document.current_line
@@ -2227,27 +2182,6 @@ class Cmd(object):
 
         :return: True implies the entire application should exit.
         """
-        # An almost perfect copy from Cmd; however, the pseudo_raw_input portion
-        # has been split out so that it can be called separately
-        if self.use_rawinput and self.completekey and rl_type != RlType.NONE:
-
-            # Set up readline for our tab completion needs
-            if rl_type == RlType.GNU:
-                # Set GNU readline's rl_basic_quote_characters to NULL so it won't automatically add a closing quote
-                # We don't need to worry about setting rl_completion_suppress_quote since we never declared
-                # rl_completer_quote_characters.
-                saved_basic_quotes = ctypes.cast(rl_basic_quote_characters, ctypes.c_void_p).value
-                rl_basic_quote_characters.value = None
-
-            # Break words on whitespace and quotes when tab completing
-            completer_delims = " \t\n" + ''.join(constants.QUOTES)
-
-            if self.allow_redirection:
-                # If redirection is allowed, then break words on those characters too
-                completer_delims += ''.join(constants.REDIRECTION_CHARS)
-
-            saved_delims = readline.get_completer_delims()
-            readline.set_completer_delims(completer_delims)
 
         stop = False
         try:
@@ -2272,15 +2206,6 @@ class Cmd(object):
                 # Run the command along with all associated pre and post hooks
                 stop = self.onecmd_plus_hooks(line)
         finally:
-            if self.use_rawinput and self.completekey and rl_type != RlType.NONE:
-
-                if rl_type == RlType.GNU:
-                    readline.set_completion_display_matches_hook(None)
-                    rl_basic_quote_characters.value = saved_basic_quotes
-                elif rl_type == RlType.PYREADLINE:
-                    # noinspection PyUnresolvedReferences
-                    readline.rl.mode._display_completions = orig_pyreadline_display
-
             self.cmdqueue.clear()
             self._script_dir.clear()
 
@@ -2845,7 +2770,7 @@ class Cmd(object):
         return self._STOP_AND_EXIT
 
     def select(self, opts: Union[str, List[str], List[Tuple[Any, Optional[str]]]],
-               prompt: str = 'Your choice? ') -> str:
+               message: str = 'Your choice? ') -> str:
         """Presents a numbered menu to the user.  Modeled after
            the bash shell's SELECT.  Returns the item chosen.
 
@@ -2871,13 +2796,8 @@ class Cmd(object):
         for (idx, (_, text)) in enumerate(fulloptions):
             self.poutput('  %2d. %s\n' % (idx + 1, text))
         while True:
-            safe_prompt = rl_make_safe_prompt(prompt)
-            response = input(safe_prompt)
-
-            if rl_type != RlType.NONE:
-                hlen = readline.get_current_history_length()
-                if hlen >= 1 and response != '':
-                    readline.remove_history_item(hlen - 1)
+            with patch_stdout():
+                response = prompt(ANSI(message))
 
             try:
                 choice = int(response)
@@ -3131,17 +3051,12 @@ class Cmd(object):
 
             # If there are no args, then we will open an interactive Python console
             else:
+                from .rl_utils import rl_type, RlType, readline
                 # Set up readline for Python console
                 if rl_type != RlType.NONE:
-                    # Save cmd2 history
-                    saved_cmd2_history = []
-                    for i in range(1, readline.get_current_history_length() + 1):
-                        # noinspection PyArgumentList
-                        saved_cmd2_history.append(readline.get_history_item(i))
-
-                    readline.clear_history()
 
                     # Restore py's history
+                    readline.clear_history()
                     for item in self.py_history:
                         readline.add_history(item)
 
@@ -3149,8 +3064,6 @@ class Cmd(object):
                         # Set up tab completion for the Python console
                         # rlcompleter relies on the default settings of the Python readline module
                         if rl_type == RlType.GNU:
-                            saved_basic_quotes = ctypes.cast(rl_basic_quote_characters, ctypes.c_void_p).value
-                            rl_basic_quote_characters.value = orig_rl_basic_quotes
 
                             if 'gnureadline' in sys.modules:
                                 # rlcompleter imports readline by name, so it won't use gnureadline
@@ -3161,20 +3074,8 @@ class Cmd(object):
 
                                 sys.modules['readline'] = sys.modules['gnureadline']
 
-                        saved_delims = readline.get_completer_delims()
-                        readline.set_completer_delims(orig_rl_delims)
-
-                        # rlcompleter will not need cmd2's custom display function
-                        # This will be restored by cmd2 the next time complete() is called
-                        if rl_type == RlType.GNU:
-                            readline.set_completion_display_matches_hook(None)
-                        elif rl_type == RlType.PYREADLINE:
-                            # noinspection PyUnresolvedReferences
-                            readline.rl.mode._display_completions = self._display_matches_pyreadline
-
                         # Save off the current completer and set a new one in the Python console
                         # Make sure it tab completes from its locals() dictionary
-                        saved_completer = readline.get_completer()
                         interp.runcode("from rlcompleter import Completer")
                         interp.runcode("import readline")
                         interp.runcode("readline.set_completer(Completer(locals()).complete)")
@@ -3216,18 +3117,8 @@ class Cmd(object):
 
                         readline.clear_history()
 
-                        # Restore cmd2's history
-                        for item in saved_cmd2_history:
-                            readline.add_history(item)
-
                         if self.use_rawinput and self.completekey:
-                            # Restore cmd2's tab completion settings
-                            readline.set_completer(saved_completer)
-                            readline.set_completer_delims(saved_delims)
-
                             if rl_type == RlType.GNU:
-                                rl_basic_quote_characters.value = saved_basic_quotes
-
                                 if 'gnureadline' in sys.modules:
                                     # Restore what the readline module pointed to
                                     if saved_readline is None:
@@ -3351,10 +3242,7 @@ class Cmd(object):
             # Clear command and readline history
             self.history.clear()
 
-            if rl_type != RlType.NONE:
-                #readline.clear_history()
-                if self.persistent_history_file:
-                    os.remove(self.persistent_history_file)
+            # TODO
             return
 
         # If an argument was supplied, then retrieve partial contents of the history

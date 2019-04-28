@@ -115,37 +115,3 @@ elif 'gnureadline' in sys.modules or 'readline' in sys.modules:
         # Load the readline lib so we can access members of it
         import ctypes
         readline_lib = ctypes.CDLL(readline.__file__)
-
-
-# TODO: this needs to be replaced for its use in select()
-# just make a separate prompt session
-def rl_make_safe_prompt(prompt: str) -> str:  # pragma: no cover
-    """Overcome bug in GNU Readline in relation to calculation of prompt length in presence of ANSI escape codes.
-
-    :param prompt: original prompt
-    :return: prompt safe to pass to GNU Readline
-    """
-    if rl_type == RlType.GNU:
-        # start code to tell GNU Readline about beginning of invisible characters
-        start = "\x01"
-
-        # end code to tell GNU Readline about end of invisible characters
-        end = "\x02"
-
-        escaped = False
-        result = ""
-
-        for c in prompt:
-            if c == "\x1b" and not escaped:
-                result += start + c
-                escaped = True
-            elif c.isalpha() and escaped:
-                result += c + end
-                escaped = False
-            else:
-                result += c
-
-        return result
-
-    else:
-        return prompt
