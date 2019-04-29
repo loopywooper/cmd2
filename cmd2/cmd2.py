@@ -47,6 +47,7 @@ from prompt_toolkit import PromptSession, prompt
 from prompt_toolkit.shortcuts import CompleteStyle, set_title
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.document import Document
 
 from . import constants
 from . import plugin
@@ -93,7 +94,6 @@ try:
 except ImportError:  # pragma: no cover
     ipython_available = False
 
-
 # optional attribute, when tagged on a function, allows cmd2 to categorize commands
 HELP_CATEGORY = 'help_category'
 
@@ -121,7 +121,9 @@ class MyCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         completions = self.cmd.complete(document)
-        if self.cmd.display_matches:
+
+        # if we have multiple matches, then we need to check display_matches
+        if len(completions) > 1 and self.cmd.display_matches:
             completions = self.cmd.display_matches
 
         # TODO: need to overwrite the display function that tab uses
@@ -130,8 +132,19 @@ class MyCompleter(Completer):
         if self.cmd.completion_header:
             pass
 
+        # find the beginning of the word that we're completing relative to the
+        # cursor position
+        text = document.text_before_cursor
+        b = text[::-1]
+        for m in self.cmd.regex.finditer(b):
+            # NOTE: this is not the same as text[-m.start(0)] when it is 0
+            text = text[len(text) - m.start(0):]
+            break
+        else:
+            text = ''
+
         for c in completions:
-            yield Completion(c, document.find_boundaries_of_current_word()[0])
+            yield Completion(c, -len(text))
 
 
 def categorize(func: Union[Callable, Iterable], category: str) -> None:
@@ -151,9 +164,11 @@ def categorize(func: Union[Callable, Iterable], category: str) -> None:
 
 def with_category(category: str) -> Callable:
     """A decorator to apply a category to a command function."""
+
     def cat_decorator(func):
         categorize(func, category)
         return func
+
     return cat_decorator
 
 
@@ -374,6 +389,12 @@ class Cmd(object):
             self.stdout = sys.stdout
         self.cmdqueue = []
         self.completekey = completekey
+
+        # Break words on whitespace and quotes when tab completing
+        self.regex = re.compile('([ \t\n"' + "'])")
+        # If redirection is allowed, then break words on those characters too
+        if allow_redirection:
+            self.regex = re.compile('([ \t\n"' + "'|>])")
 
         self.prompt_session = PromptSession(message=self.get_prompt,
                                             complete_style=CompleteStyle.READLINE_LIKE,
@@ -1097,6 +1118,7 @@ class Cmd(object):
             if text.startswith('~'):
                 sep_index = text.find(os.path.sep, 1)
 
+                # TODO: this confuses me...
                 # If there is no slash, then the user is still completing the user after the tilde
                 if sep_index == -1:
                     return complete_users()
@@ -1311,7 +1333,7 @@ class Cmd(object):
             self.stdout.write("%s\n" % str(header))
             if self.ruler:
                 self.stdout.write("%s\n" % str(self.ruler * len(header)))
-            self.columnize(cmds, maxcol-1)
+            self.columnize(cmds, maxcol - 1)
             self.stdout.write("\n")
 
     def columnize(self, list, displaywidth=80):
@@ -1325,23 +1347,23 @@ class Cmd(object):
             return
 
         nonstrings = [i for i in range(len(list))
-                        if not isinstance(list[i], str)]
+                      if not isinstance(list[i], str)]
         if nonstrings:
             raise TypeError("list[i] not a string for i in %s"
                             % ", ".join(map(str, nonstrings)))
         size = len(list)
         if size == 1:
-            self.stdout.write('%s\n'% str(list[0]))
+            self.stdout.write('%s\n' % str(list[0]))
             return
         # Try every row count from 1 upwards
         for nrows in range(1, len(list)):
-            ncols = (size+nrows-1) // nrows
+            ncols = (size + nrows - 1) // nrows
             colwidths = []
             totwidth = -2
             for col in range(ncols):
                 colwidth = 0
                 for row in range(nrows):
-                    i = row + nrows*col
+                    i = row + nrows * col
                     if i >= size:
                         break
                     x = list[i]
@@ -1359,7 +1381,7 @@ class Cmd(object):
         for row in range(nrows):
             texts = []
             for col in range(ncols):
-                i = row + nrows*col
+                i = row + nrows * col
                 if i >= size:
                     x = ""
                 else:
@@ -1369,10 +1391,9 @@ class Cmd(object):
                 del texts[-1]
             for col in range(len(texts)):
                 texts[col] = texts[col].ljust(colwidths[col])
-            self.stdout.write("%s\n"%str("  ".join(texts)))
+            self.stdout.write("%s\n" % str("  ".join(texts)))
 
-    # todo: type this
-    def complete(self, document) -> List[str]:
+    def complete(self, document: Document) -> List[str]:
         """Override of command method which returns the next possible completion for 'text'.
 
         If a command has not been entered, then complete against command list.
@@ -1383,11 +1404,14 @@ class Cmd(object):
         This completer function is called as complete(text, state), for state in 0, 1, 2, …, until it returns a
         non-string value. It should return the next possible completion starting with text.
 
-        :param text: the current word that user is typing
+        :param document: the current word that user is typing
         """
         import functools
 
         unclosed_quote = ''
+
+        # make sure to reset completion defaults every time we go to complete something
+        # these are changed depending on the subroutines called
         self.reset_completion_defaults()
 
         # lstrip the original line
@@ -1395,11 +1419,20 @@ class Cmd(object):
         line = orig_line.lstrip()
         stripped = len(orig_line) - len(line)
 
-        text = document.get_word_before_cursor()
+        # the Document get_word_before_cursor does not work when you supply your own
+        # pattern. this is what I expect
+        text = document.text_before_cursor
+        b = text[::-1]
+        for m in self.regex.finditer(b):
+            # NOTE: this is not the same as text[-m.start(0)] when it is 0
+            text = text[len(text) - m.start(0):]
+            break
+        else:
+            text = ''
 
         # Calculate new indexes for the stripped line. If the cursor is at a position before the end of a
         # line of spaces, then the following math could result in negative indexes. Enforce a max of 0.
-        begidx = document.cursor_position + document.find_boundaries_of_current_word()[0] - stripped
+        begidx = document.cursor_position - len(text) - stripped
         endidx = document.cursor_position - stripped
 
         # Shortcuts are not word break characters when tab completing. Therefore shortcuts become part
@@ -2141,7 +2174,7 @@ class Cmd(object):
                         line = self.prompt_session.prompt()
                 else:
                     # TODO: should this just be input??
-                    #line = self.prompt_session.prompt()
+                    # line = self.prompt_session.prompt()
                     line = input()
                     if self.echo:
                         sys.stdout.write('{}{}\n'.format(prompt, line))
@@ -3122,7 +3155,7 @@ class Cmd(object):
                                 if 'gnureadline' in sys.modules:
                                     # Restore what the readline module pointed to
                                     if saved_readline is None:
-                                        del(sys.modules['readline'])
+                                        del (sys.modules['readline'])
                                     else:
                                         sys.modules['readline'] = saved_readline
 
@@ -3183,11 +3216,13 @@ class Cmd(object):
                 # noinspection PyUnusedLocal
                 def load_ipy(cmd2_instance, app):
                     embed(banner1=banner, exit_msg=exit_msg)
+
                 load_ipy(self, bridge)
             else:
                 # noinspection PyUnusedLocal
                 def load_ipy(app):
                     embed(banner1=banner, exit_msg=exit_msg)
+
                 load_ipy(bridge)
 
     history_parser = ACArgumentParser()
@@ -3808,9 +3843,9 @@ class Cmd(object):
         nparam = len(signature.parameters)
         if nparam != count:
             raise TypeError('{} has {} positional arguments, expected {}'.format(
-                func.__name__,
-                nparam,
-                count,
+                    func.__name__,
+                    nparam,
+                    count,
             ))
 
     @classmethod
@@ -3821,7 +3856,7 @@ class Cmd(object):
         signature = inspect.signature(func)
         if signature.return_annotation is not None:
             raise TypeError("{} must declare return a return type of 'None'".format(
-                func.__name__,
+                    func.__name__,
             ))
 
     def register_preloop_hook(self, func: Callable[[None], None]) -> None:
@@ -3842,11 +3877,11 @@ class Cmd(object):
         _, param = list(signature.parameters.items())[0]
         if param.annotation != plugin.PostparsingData:
             raise TypeError("{} must have one parameter declared with type 'cmd2.plugin.PostparsingData'".format(
-                func.__name__
+                    func.__name__
             ))
         if signature.return_annotation != plugin.PostparsingData:
             raise TypeError("{} must declare return a return type of 'cmd2.plugin.PostparsingData'".format(
-                func.__name__
+                    func.__name__
             ))
 
     def register_postparsing_hook(self, func: Callable[[plugin.PostparsingData], plugin.PostparsingData]) -> None:
@@ -3865,21 +3900,21 @@ class Cmd(object):
         param = signature.parameters[paramname]
         if param.annotation != data_type:
             raise TypeError('argument 1 of {} has incompatible type {}, expected {}'.format(
-                func.__name__,
-                param.annotation,
-                data_type,
+                    func.__name__,
+                    param.annotation,
+                    data_type,
             ))
         # validate the return value has the right annotation
         if signature.return_annotation == signature.empty:
             raise TypeError('{} does not have a declared return type, expected {}'.format(
-                func.__name__,
-                data_type,
+                    func.__name__,
+                    data_type,
             ))
         if signature.return_annotation != data_type:
             raise TypeError('{} has incompatible return type {}, expected {}'.format(
-                func.__name__,
-                signature.return_annotation,
-                data_type,
+                    func.__name__,
+                    signature.return_annotation,
+                    data_type,
             ))
 
     def register_precmd_hook(self, func: Callable[[plugin.PrecommandData], plugin.PrecommandData]) -> None:
