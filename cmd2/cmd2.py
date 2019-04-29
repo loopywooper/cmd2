@@ -140,8 +140,6 @@ class MyCompleter(Completer):
             # NOTE: this is not the same as text[-m.start(0)] when it is 0
             text = text[len(text) - m.start(0):]
             break
-        else:
-            text = ''
 
         for c in completions:
             yield Completion(c, -len(text))
@@ -1419,7 +1417,7 @@ class Cmd(object):
         line = orig_line.lstrip()
         stripped = len(orig_line) - len(line)
 
-        # the Document get_word_before_cursor does not work when you supply your own
+        # the Document method get_word_before_cursor does not work when you supply your own
         # pattern. this is what I expect
         text = document.text_before_cursor
         b = text[::-1]
@@ -1427,8 +1425,6 @@ class Cmd(object):
             # NOTE: this is not the same as text[-m.start(0)] when it is 0
             text = text[len(text) - m.start(0):]
             break
-        else:
-            text = ''
 
         # Calculate new indexes for the stripped line. If the cursor is at a position before the end of a
         # line of spaces, then the following math could result in negative indexes. Enforce a max of 0.
