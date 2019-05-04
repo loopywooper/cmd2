@@ -54,7 +54,7 @@ from . import plugin
 from . import utils
 from .argparse_completer import AutoCompleter, ACArgumentParser, ACTION_ARG_CHOICES
 from .clipboard import can_clip, get_paste_buffer, write_to_paste_buffer
-from .history import History, HistoryItem
+from .history import History, HistoryItem, CmdHistory
 from .parsing import StatementParser, Statement, Macro, MacroArg, shlex_split
 
 # Collection is a container that is sizable and iterable
@@ -63,6 +63,7 @@ try:
     from collections.abc import Collection, Iterable
 except ImportError:
     from collections.abc import Sized, Iterable, Container
+
 
     # noinspection PyAbstractClass
     class Collection(Sized, Iterable, Container):
@@ -394,10 +395,14 @@ class Cmd(object):
         if allow_redirection:
             self.regex = re.compile('([ \t\n"' + "'|>])")
 
+        self.cmd_history = CmdHistory(persistent_history_file,
+                                      persistent_history_length)
+
         self.prompt_session = PromptSession(message=self.get_prompt,
                                             complete_style=CompleteStyle.READLINE_LIKE,
                                             completer=MyCompleter(self),
-                                            refresh_interval=0.5)
+                                            refresh_interval=0.5,
+                                            history=self.cmd_history)
 
         # Attributes which should NOT be dynamically settable at runtime
         self.allow_cli_args = True  # Should arguments passed on the command-line be processed as commands?
@@ -488,12 +493,6 @@ class Cmd(object):
 
         # If this string is non-empty, then this warning message will print if a broken pipe error occurs while printing
         self.broken_pipe_warning = ''
-
-        # TODO
-        # Check if history should persist
-        self.persistent_history_file = ''
-        if persistent_history_file:
-            pass
 
         # If a startup script is provided, then add it in the queue to load
         if startup_script is not None:
@@ -3273,7 +3272,7 @@ class Cmd(object):
             # Clear command and readline history
             self.history.clear()
 
-            # TODO
+            self.cmd_history.clear()
             return
 
         # If an argument was supplied, then retrieve partial contents of the history

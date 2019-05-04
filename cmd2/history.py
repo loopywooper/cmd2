@@ -4,11 +4,65 @@ History management classes
 """
 
 import re
+import datetime
+import os
 
 from typing import List, Union
 
 from . import utils
 from .parsing import Statement
+
+from prompt_toolkit.history import History
+
+
+class CmdHistory(History):
+    def __init__(self, filename, length):
+        self.filename = filename
+        self.history_length = length
+        super().__init__()
+
+    def load_history_strings(self):
+        strings = []
+        lines = []
+
+        def add():
+            if lines:
+                # Join and drop trailing newline.
+                string = ''.join(lines)[:-1]
+
+                strings.append(string)
+
+        if self.filename and os.path.exists(self.filename):
+            with open(self.filename, 'rb') as f:
+                for line in f:
+                    line = line.decode('utf-8')
+
+                    if line.startswith('+'):
+                        lines.append(line[1:])
+                    else:
+                        add()
+                        lines = []
+
+                add()
+
+        # Reverse the order, because newest items have to go first.
+        return reversed(strings)
+
+    def store_string(self, string):
+        # Save to file.
+        if self.filename and string.split()[0]:
+            with open(self.filename, 'ab') as f:
+                def write(t):
+                    f.write(t.encode('utf-8'))
+
+                write('\n# %s\n' % datetime.datetime.now())
+                for line in string.split('\n'):
+                    write('+%s\n' % line)
+
+    def clear(self):
+        self._loaded_strings.clear()
+        if self.filename:
+            os.remove(self.filename)
 
 
 class HistoryItem(str):
