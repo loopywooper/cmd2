@@ -5,6 +5,8 @@ This module provides basic ability to copy from and paste to the clipboard/paste
 import sys
 
 import pyperclip
+from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
+from prompt_toolkit.clipboard import InMemoryClipboard
 
 # Newer versions of pyperclip are released as a single file, but older versions had a more complicated structure
 try:
@@ -27,9 +29,9 @@ try:
         # Try getting the contents of the clipboard
         _ = pyperclip.paste()
 except PyperclipException:
-    can_clip = False
+    clipboard = InMemoryClipboard()
 else:
-    can_clip = True
+    clipboard = PyperclipClipboard()
 
 
 def get_paste_buffer() -> str:
@@ -37,7 +39,7 @@ def get_paste_buffer() -> str:
 
     :return: contents of the clipboard
     """
-    pb_str = pyperclip.paste()
+    pb_str = clipboard.get_data().text
     return pb_str
 
 
@@ -46,4 +48,4 @@ def write_to_paste_buffer(txt: str) -> None:
 
     :param txt: text to copy to the clipboard
     """
-    pyperclip.copy(txt)
+    clipboard.set_text(txt)

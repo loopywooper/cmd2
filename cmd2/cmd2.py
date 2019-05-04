@@ -53,7 +53,7 @@ from . import constants
 from . import plugin
 from . import utils
 from .argparse_completer import AutoCompleter, ACArgumentParser, ACTION_ARG_CHOICES
-from .clipboard import can_clip, get_paste_buffer, write_to_paste_buffer
+from .clipboard import get_paste_buffer, write_to_paste_buffer, clipboard
 from .history import History, HistoryItem, CmdHistory
 from .parsing import StatementParser, Statement, Macro, MacroArg, shlex_split
 
@@ -63,7 +63,6 @@ try:
     from collections.abc import Collection, Iterable
 except ImportError:
     from collections.abc import Sized, Iterable, Container
-
 
     # noinspection PyAbstractClass
     class Collection(Sized, Iterable, Container):
@@ -398,11 +397,14 @@ class Cmd(object):
         self.cmd_history = CmdHistory(persistent_history_file,
                                       persistent_history_length)
 
+        self.clipboard = clipboard
+
         self.prompt_session = PromptSession(message=self.get_prompt,
                                             complete_style=CompleteStyle.READLINE_LIKE,
                                             completer=MyCompleter(self),
                                             refresh_interval=0.5,
-                                            history=self.cmd_history)
+                                            history=self.cmd_history,
+                                            clipboard=self.clipboard)
 
         # Attributes which should NOT be dynamically settable at runtime
         self.allow_cli_args = True  # Should arguments passed on the command-line be processed as commands?
@@ -548,9 +550,6 @@ class Cmd(object):
             # -F causes less to automatically exit if the entire file can be displayed on the first screen
             self.pager = 'less -RXF'
             self.pager_chop = 'less -SRXF'
-
-        # This boolean flag determines whether or not the cmd2 application can interact with the clipboard
-        self.can_clip = can_clip
 
         # This determines if a non-zero exit code should be used when exiting the application
         self.exit_code = None
@@ -744,7 +743,6 @@ class Cmd(object):
         """
         self.allow_appended_space = True
         self.allow_closing_quote = True
-        # TODO: need to figure out how this is used
         self.completion_header = ''
         self.display_matches = []
         self.matches_delimited = False
@@ -1978,12 +1976,7 @@ class Cmd(object):
 
         elif statement.output:
             import tempfile
-            if (not statement.output_to) and (not self.can_clip):
-                self.perror("Cannot redirect to paste buffer; install 'pyperclip' and re-run to enable",
-                            traceback_war=False)
-                redir_error = True
-
-            elif statement.output_to:
+            if statement.output_to:
                 # going to a file
                 mode = 'w'
                 # statement.output can only contain
