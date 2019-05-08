@@ -48,6 +48,9 @@ from prompt_toolkit.shortcuts import CompleteStyle, set_title
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import has_selection, has_focus, Condition, vi_insert_mode, emacs_insert_mode
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.enums import DEFAULT_BUFFER
 
 from . import constants
 from . import plugin
@@ -63,6 +66,7 @@ try:
     from collections.abc import Collection, Iterable
 except ImportError:
     from collections.abc import Sized, Iterable, Container
+
 
     # noinspection PyAbstractClass
     class Collection(Sized, Iterable, Container):
@@ -307,6 +311,77 @@ class EmptyStatement(Exception):
     pass
 
 
+def load_python_bindings(cmd2_instance):
+    """
+    Custom key bindings.
+    """
+    bindings = KeyBindings()
+    handle = bindings.add
+
+    @Condition
+    def is_multiline():
+        text = cmd2_instance.prompt_session.default_buffer.document.text
+        statement = cmd2_instance.statement_parser.parse_command_only(text)
+        return statement.multiline_command != ''
+
+    @handle('enter', filter=~has_selection &
+                            (vi_insert_mode | emacs_insert_mode) &
+                            has_focus(DEFAULT_BUFFER) & ~is_multiline)
+    def _(event):
+        """
+        Accept input (for single line input).
+        """
+        b = event.current_buffer
+
+        if b.validate():
+            # When the cursor is at the end, and we have an empty line:
+            # drop the empty lines, but return the value.
+            b.document = Document(
+                    text=b.text.rstrip(),
+                    cursor_position=len(b.text.rstrip()))
+
+            b.validate_and_handle()
+
+    @handle('enter', filter=~has_selection &
+                            (vi_insert_mode | emacs_insert_mode) &
+                            has_focus(DEFAULT_BUFFER) & is_multiline)
+    def _(event):
+        """
+        Behaviour of the Enter key.
+
+        Auto indent after newline/Enter.
+        (When not in Vi navigaton mode, and when multiline is enabled.)
+        """
+        b = event.current_buffer
+        empty_lines_required = 2
+
+        def at_the_end(b):
+            """ we consider the cursor at the end when there is no text after
+            the cursor, or only whitespace. """
+            text = b.document.text_after_cursor
+            return text == '' or (text.isspace() and '\n' not in text)
+
+        # if we're at the end of the buffer and either of the following is true, execute command
+        # 1) we have the minimum number of empty lines (hard coded to 2)
+        # 2) the buffer ends in a command terminator
+        # TODO: how to look for things like unclosed quotes or escaped command terminators?
+        b_tmp = b.document.text.replace(' ', '')
+        if at_the_end(b) and (b_tmp.endswith('\n' * (empty_lines_required - 1))
+                              or b_tmp[-1] in cmd2_instance.statement_parser.terminators):
+            # When the cursor is at the end, and we have an empty line:
+            # drop the empty lines, but return the value.
+            if b.validate():
+                b.document = Document(
+                        text=b.text.rstrip(),
+                        cursor_position=len(b.text.rstrip()))
+
+                b.validate_and_handle()
+        else:
+            b.insert_text('\n')
+
+    return bindings
+
+
 # Contains data about a disabled command which is used to restore its original functions when the command is enabled
 DisabledCommand = namedtuple('DisabledCommand', ['command_function', 'help_function'])
 
@@ -404,7 +479,9 @@ class Cmd(object):
                                             completer=MyCompleter(self),
                                             refresh_interval=0.5,
                                             history=self.cmd_history,
-                                            clipboard=self.clipboard)
+                                            clipboard=self.clipboard,
+                                            key_bindings=load_python_bindings(self),
+                                            prompt_continuation=self.get_continuation_prompt)
 
         # Attributes which should NOT be dynamically settable at runtime
         self.allow_cli_args = True  # Should arguments passed on the command-line be processed as commands?
@@ -574,6 +651,24 @@ class Cmd(object):
         :return: ANSI text formatted object of the current prompt
         """
         return ANSI(self.prompt)
+
+    # TODO: how to make this dynamic at runtime? (global var?)
+    @staticmethod
+    def get_continuation_prompt(width, line_number, wrap_count):
+        """
+        The continuation: display line numbers and '->' before soft wraps.
+
+        Notice that we can return any kind of formatted text from here.
+
+        The prompt continuation doesn't have to be the same width as the prompt
+        which is displayed before the first line, but in this example we choose to
+        align them. The `width` input that we receive here represents the width of
+        the prompt.
+        """
+        if wrap_count > 0:
+            return ''
+        else:
+            return '> '
 
     @property
     def visible_prompt(self) -> str:
@@ -1895,8 +1990,13 @@ class Cmd(object):
             #   - a multiline command with no terminator
             #   - a multiline command with unclosed quotation marks
             try:
+                # TODO: need to refactor this
+                    # not much needs to happen in this function...
                 self.at_continuation_prompt = True
-                newline = self.pseudo_raw_input(self.continuation_prompt)
+                # print('multi', self.continuation_prompt)
+                # newline = self.pseudo_raw_input(self.continuation_prompt)
+                # print("newline '{}'".format(newline))
+                newline = 'eof'
                 if newline == 'eof':
                     # they entered either a blank line, or we hit an EOF
                     # for some other reason. Turn the literal 'eof'
@@ -3264,7 +3364,6 @@ class Cmd(object):
         if args.clear:
             # Clear command and readline history
             self.history.clear()
-
             self.cmd_history.clear()
             return
 
