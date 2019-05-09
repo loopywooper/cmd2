@@ -1394,16 +1394,6 @@ class Cmd(object):
         """
         pass
 
-    def emptyline(self):
-        """Called when an empty line is entered in response to the prompt.
-
-        If this method is not overridden, it repeats the last nonempty
-        command entered.
-
-        """
-        if self.lastcmd:
-            return self.onecmd(self.lastcmd)
-
     def completedefault(self, *ignored):
         """Method called to complete an input line when no command-specific
         complete_*() method is available.
@@ -1811,9 +1801,9 @@ class Cmd(object):
 
         stop = False
         try:
-            statement = self._complete_statement(line)
-        except EmptyStatement:
-            return self._run_cmdfinalization_hooks(stop, None)
+            statement = self.statement_parser.parse(line)
+            if not statement.command:
+                return self._run_cmdfinalization_hooks(stop, None)
         except ValueError as ex:
             # If shlex.split failed on syntax, let user know whats going on
             self.perror("Invalid syntax: {}".format(ex), traceback_war=False)
@@ -1960,65 +1950,6 @@ class Cmd(object):
             # necessary/desired here.
             return stop
 
-    def _complete_statement(self, line: str) -> Statement:
-        """Keep accepting lines of input until the command is complete.
-
-        There is some pretty hacky code here to handle some quirks of
-        self.pseudo_raw_input(). It returns a literal 'eof' if the input
-        pipe runs out. We can't refactor it because we need to retain
-        backwards compatibility with the standard library version of cmd.
-        """
-        while True:
-            try:
-                statement = self.statement_parser.parse(line)
-                if statement.multiline_command and statement.terminator:
-                    # we have a completed multiline command, we are done
-                    break
-                if not statement.multiline_command:
-                    # it's not a multiline command, but we parsed it ok
-                    # so we are done
-                    break
-            except ValueError:
-                # we have unclosed quotation marks, lets parse only the command
-                # and see if it's a multiline
-                statement = self.statement_parser.parse_command_only(line)
-                if not statement.multiline_command:
-                    # not a multiline command, so raise the exception
-                    raise
-
-            # if we get here we must have:
-            #   - a multiline command with no terminator
-            #   - a multiline command with unclosed quotation marks
-            try:
-                # TODO: need to refactor this
-                    # not much needs to happen in this function...
-                self.at_continuation_prompt = True
-                # print('multi', self.continuation_prompt)
-                # newline = self.pseudo_raw_input(self.continuation_prompt)
-                # print("newline '{}'".format(newline))
-                newline = 'eof'
-                if newline == 'eof':
-                    # they entered either a blank line, or we hit an EOF
-                    # for some other reason. Turn the literal 'eof'
-                    # into a blank line, which serves as a command
-                    # terminator
-                    newline = '\n'
-                    self.poutput(newline)
-                line = '{}\n{}'.format(statement.raw, newline)
-            except KeyboardInterrupt as ex:
-                if self.quit_on_sigint:
-                    raise ex
-                else:
-                    self.poutput('^C')
-                    statement = self.statement_parser.parse('')
-                    break
-            finally:
-                self.at_continuation_prompt = False
-
-        if not statement.command:
-            raise EmptyStatement()
-        return statement
-
     def _redirect_output(self, statement: Statement) -> Tuple[bool, utils.RedirectionSavedState]:
         """Handles output redirection for >, >>, and |.
 
@@ -2160,7 +2091,9 @@ class Cmd(object):
         """
         # For backwards compatibility with cmd, allow a str to be passed in
         if not isinstance(statement, Statement):
-            statement = self._complete_statement(statement)
+            statement = self.statement_parser.parse(statement)
+            if not statement.command:
+                raise EmptyStatement()
 
         # Check if this is a macro
         if statement.command in self.macros:
