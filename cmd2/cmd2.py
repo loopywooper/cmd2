@@ -60,13 +60,46 @@ from .clipboard import get_paste_buffer, write_to_paste_buffer, clipboard
 from .history import History, HistoryItem, CmdHistory
 from .parsing import StatementParser, Statement, Macro, MacroArg, shlex_split
 
+from enum import Enum
+
+# Imports the proper readline for the platform and provides utility functions for it
+# Prefer statically linked gnureadline if available (for macOS compatibility due to issues with libedit)
+try:
+    # noinspection PyPackageRequirements
+    import gnureadline as readline
+except ImportError:
+    # Try to import readline, but allow failure for convenience in Windows unit testing
+    # Note: If this actually fails, you should install readline on Linux or Mac or pyreadline on Windows
+    try:
+        # noinspection PyUnresolvedReferences
+        import readline
+    except ImportError:  # pragma: no cover
+        pass
+
+
+class RlType(Enum):
+    """Readline library types we recognize"""
+    GNU = 1
+    PYREADLINE = 2
+    NONE = 3
+
+
+# Check what implementation of readline we are using
+rl_type = RlType.NONE
+
+# The order of this check matters since importing pyreadline will also show readline in the modules list
+if 'pyreadline' in sys.modules:
+    rl_type = RlType.PYREADLINE
+
+elif 'gnureadline' in sys.modules or 'readline' in sys.modules:
+    rl_type = RlType.GNU
+
 # Collection is a container that is sizable and iterable
 # It was introduced in Python 3.6. We will try to import it, otherwise use our implementation
 try:
     from collections.abc import Collection, Iterable
 except ImportError:
     from collections.abc import Sized, Iterable, Container
-
 
     # noinspection PyAbstractClass
     class Collection(Sized, Iterable, Container):
@@ -311,6 +344,7 @@ class EmptyStatement(Exception):
     pass
 
 
+# TODO document this
 def load_python_bindings(cmd2_instance):
     """
     Custom key bindings.
@@ -324,9 +358,8 @@ def load_python_bindings(cmd2_instance):
         statement = cmd2_instance.statement_parser.parse_command_only(text)
         return statement.multiline_command != ''
 
-    @handle('enter', filter=~has_selection &
-                            (vi_insert_mode | emacs_insert_mode) &
-                            has_focus(DEFAULT_BUFFER) & ~is_multiline)
+    @handle('enter', filter=~has_selection & ~is_multiline &
+            (vi_insert_mode | emacs_insert_mode) & has_focus(DEFAULT_BUFFER))
     def _(event):
         """
         Accept input (for single line input).
@@ -342,9 +375,8 @@ def load_python_bindings(cmd2_instance):
 
             b.validate_and_handle()
 
-    @handle('enter', filter=~has_selection &
-                            (vi_insert_mode | emacs_insert_mode) &
-                            has_focus(DEFAULT_BUFFER) & is_multiline)
+    @handle('enter', filter=~has_selection & is_multiline &
+            (vi_insert_mode | emacs_insert_mode) & has_focus(DEFAULT_BUFFER))
     def _(event):
         """
         Behaviour of the Enter key.
@@ -355,10 +387,10 @@ def load_python_bindings(cmd2_instance):
         b = event.current_buffer
         empty_lines_required = 2
 
-        def at_the_end(b):
+        def at_the_end(buf):
             """ we consider the cursor at the end when there is no text after
             the cursor, or only whitespace. """
-            text = b.document.text_after_cursor
+            text = buf.document.text_after_cursor
             return text == '' or (text.isspace() and '\n' not in text)
 
         # if we're at the end of the buffer and either of the following is true, execute command
@@ -385,8 +417,6 @@ def load_python_bindings(cmd2_instance):
 # Contains data about a disabled command which is used to restore its original functions when the command is enabled
 DisabledCommand = namedtuple('DisabledCommand', ['command_function', 'help_function'])
 
-PROMPT = '(Cmd) '
-
 
 class Cmd(object):
     """An easy but powerful framework for writing line-oriented command interpreters.
@@ -399,7 +429,7 @@ class Cmd(object):
     DEFAULT_SHORTCUTS = {'?': 'help', '!': 'shell', '@': 'load', '@@': '_relative_load'}
     DEFAULT_EDITOR = utils.find_editor()
 
-    prompt = PROMPT
+    prompt = '(Cmd) '
     ruler = '='
     lastcmd = ''
     intro = None
@@ -442,16 +472,6 @@ class Cmd(object):
         # needs to be done before we call __init__(0)
         self._initialize_plugin_system()
 
-        """Instantiate a line-oriented interpreter framework.
-
-        The optional argument 'completekey' is the readline name of a
-        completion key; it defaults to the Tab key. If completekey is
-        not None and the readline module is available, command completion
-        is done automatically. The optional arguments stdin and stdout
-        specify alternate input and output file objects; if not specified,
-        sys.stdin and sys.stdout are used.
-
-        """
         if stdin is not None:
             self.stdin = stdin
         else:
@@ -465,10 +485,12 @@ class Cmd(object):
 
         # Break words on whitespace and quotes when tab completing
         self.regex = re.compile('([ \t\n"' + "'])")
+
         # If redirection is allowed, then break words on those characters too
         if allow_redirection:
             self.regex = re.compile('([ \t\n"' + "'|>])")
 
+        # use a readline-like history for prompt and persistent history
         self.cmd_history = CmdHistory(persistent_history_file,
                                       persistent_history_length)
 
@@ -631,6 +653,7 @@ class Cmd(object):
         # This determines if a non-zero exit code should be used when exiting the application
         self.exit_code = None
 
+        # TODO: look into this usage vs patch_stdout
         # This lock should be acquired before doing any asynchronous changes to the terminal to
         # ensure the updates to the terminal don't interfere with the input being typed or output
         # being printed by a command.
@@ -643,7 +666,7 @@ class Cmd(object):
 
     # -----  Methods related to presenting output to the user -----
 
-    def get_prompt(self):
+    def get_prompt(self) -> ANSI:
         """Simply get the current prompt converted to ANSI formatted text object.
         Prompt toolkit needs a callable object to refresh the prompt. This allows a user
         to simply modify self.prompt.
@@ -653,17 +676,14 @@ class Cmd(object):
         return ANSI(self.prompt)
 
     # TODO: how to make this dynamic at runtime? (global var?)
+    # noinspection PyUnusedLocal
     @staticmethod
-    def get_continuation_prompt(width, line_number, wrap_count):
+    def get_continuation_prompt(width: int, line_number: int, wrap_count: int) -> str:
         """
-        The continuation: display line numbers and '->' before soft wraps.
+        The continuation: display continuation prompt for multiline commands
+        and '' before soft wraps.
 
         Notice that we can return any kind of formatted text from here.
-
-        The prompt continuation doesn't have to be the same width as the prompt
-        which is displayed before the first line, but in this example we choose to
-        align them. The `width` input that we receive here represents the width of
-        the prompt.
         """
         if wrap_count > 0:
             return ''
@@ -1379,22 +1399,9 @@ class Cmd(object):
 
     # -----  Methods which override stuff in cmd -----
 
-    def postcmd(self, stop, line):
-        """Hook method executed just after a command dispatch is finished."""
-        return stop
-
-    def preloop(self):
-        """Hook method executed once when the cmdloop() method is called."""
-        pass
-
-    def postloop(self):
-        """Hook method executed once when the cmdloop() method is about to
-        return.
-
-        """
-        pass
-
-    def completedefault(self, *ignored):
+    # noinspection PyUnusedLocal
+    @staticmethod
+    def completedefault(*ignored) -> List[str]:
         """Method called to complete an input line when no command-specific
         complete_*() method is available.
 
@@ -1403,12 +1410,13 @@ class Cmd(object):
         """
         return []
 
-    def get_names(self):
+    def get_names(self) -> List[str]:
         # This method used to pull in base class attributes
         # at a time dir() didn't do it yet.
         return dir(self.__class__)
 
-    def print_topics(self, header, cmds, cmdlen, maxcol):
+    # noinspection PyUnusedLocal
+    def print_topics(self, header: str, cmds: List[str], cmdlen: int, maxcol: int) -> None:
         if cmds:
             self.stdout.write("%s\n" % str(header))
             if self.ruler:
@@ -1416,27 +1424,28 @@ class Cmd(object):
             self.columnize(cmds, maxcol - 1)
             self.stdout.write("\n")
 
-    def columnize(self, list, displaywidth=80):
+    # TODO: how do you type this
+    def columnize(self, str_list: List[str], displaywidth: int = 80) -> None:
         """Display a list of strings as a compact set of columns.
 
         Each column is only as wide as necessary.
         Columns are separated by two spaces (one was not legible enough).
         """
-        if not list:
+        if not str_list:
             self.stdout.write("<empty>\n")
             return
 
-        nonstrings = [i for i in range(len(list))
-                      if not isinstance(list[i], str)]
+        nonstrings = [i for i in range(len(str_list))
+                      if not isinstance(str_list[i], str)]
         if nonstrings:
             raise TypeError("list[i] not a string for i in %s"
                             % ", ".join(map(str, nonstrings)))
-        size = len(list)
+        size = len(str_list)
         if size == 1:
-            self.stdout.write('%s\n' % str(list[0]))
+            self.stdout.write('%s\n' % str(str_list[0]))
             return
         # Try every row count from 1 upwards
-        for nrows in range(1, len(list)):
+        for nrows in range(1, len(str_list)):
             ncols = (size + nrows - 1) // nrows
             colwidths = []
             totwidth = -2
@@ -1446,7 +1455,7 @@ class Cmd(object):
                     i = row + nrows * col
                     if i >= size:
                         break
-                    x = list[i]
+                    x = str_list[i]
                     colwidth = max(colwidth, len(x))
                 colwidths.append(colwidth)
                 totwidth += colwidth + 2
@@ -1455,7 +1464,7 @@ class Cmd(object):
             if totwidth <= displaywidth:
                 break
         else:
-            nrows = len(list)
+            nrows = len(str_list)
             ncols = 1
             colwidths = [0]
         for row in range(nrows):
@@ -1465,7 +1474,7 @@ class Cmd(object):
                 if i >= size:
                     x = ""
                 else:
-                    x = list[i]
+                    x = str_list[i]
                 texts.append(x)
             while texts and not texts[-1]:
                 del texts[-1]
@@ -1473,6 +1482,8 @@ class Cmd(object):
                 texts[col] = texts[col].ljust(colwidths[col])
             self.stdout.write("%s\n" % str("  ".join(texts)))
 
+    # TODO: look at this
+    # TODO: fix docstring
     def complete(self, document: Document) -> List[str]:
         """Override of command method which returns the next possible completion for 'text'.
 
@@ -1770,14 +1781,7 @@ class Cmd(object):
         if not self.sigint_protection:
             raise KeyboardInterrupt("Got a keyboard interrupt")
 
-    def precmd(self, statement: Statement) -> Statement:
-        """Hook method executed just before the command is processed by ``onecmd()`` and after adding it to the history.
-
-        :param statement: subclass of str which also contains the parsed input
-        :return: a potentially modified version of the input Statement object
-        """
-        return statement
-
+    # TODO: this can probably be removed
     def parseline(self, line: str) -> Tuple[str, str, str]:
         """Parse the line into a command name and a string containing the arguments.
 
@@ -1799,6 +1803,7 @@ class Cmd(object):
         """
         import datetime
 
+        # attempt to parse the line into a statement
         stop = False
         try:
             statement = self.statement_parser.parse(line)
@@ -1851,9 +1856,6 @@ class Cmd(object):
                         data = func(data)
                     statement = data.statement
 
-                    # call precmd() for compatibility with cmd.Cmd
-                    statement = self.precmd(statement)
-
                     # go run the command function
                     stop = self.onecmd(statement)
 
@@ -1864,9 +1866,6 @@ class Cmd(object):
 
                     # retrieve the final value of stop, ignoring any statement modification from the hooks
                     stop = data.stop
-
-                    # call postcmd() for compatibility with cmd.Cmd
-                    stop = self.postcmd(stop, statement)
 
                     if self.timing:
                         self.pfeedback('Elapsed: {}'.format(datetime.datetime.now() - timestart))
@@ -2085,6 +2084,7 @@ class Cmd(object):
 
         If the command provided doesn't exist, then it executes default() instead.
 
+        # TODO: look at this
         :param statement: intended to be a Statement instance parsed command from the input stream, alternative
                           acceptance of a str is present only for backward compatibility with cmd
         :return: a flag indicating whether the interpretation of commands should stop
@@ -2174,7 +2174,8 @@ class Cmd(object):
             err_msg = self.default_error.format(statement.command)
             self.decolorized_write(sys.stderr, "{}\n".format(err_msg))
 
-    def pseudo_raw_input(self, prompt: str) -> str:
+    # TODO: look at this
+    def pseudo_raw_input(self, msg: str) -> str:
         """Began life as a copy of cmd's cmdloop; like raw_input but
 
         - accounts for changed stdin, stdout
@@ -2195,10 +2196,10 @@ class Cmd(object):
                         line = self.prompt_session.prompt()
                 else:
                     # TODO: should this just be input??
-                    # line = self.prompt_session.prompt()
-                    line = input()
+                    line = self.prompt_session.prompt(message='')
+                    # line = input()
                     if self.echo:
-                        sys.stdout.write('{}{}\n'.format(prompt, line))
+                        sys.stdout.write('{}{}\n'.format(msg, line))
             except EOFError:
                 line = 'eof'
             finally:
@@ -2208,7 +2209,7 @@ class Cmd(object):
         else:
             if self.stdin.isatty():
                 # on a tty, print the prompt first, then read the line
-                self.poutput(prompt, end='')
+                self.poutput(msg, end='')
                 self.stdout.flush()
                 line = self.stdin.readline()
                 if len(line) == 0:
@@ -2221,7 +2222,7 @@ class Cmd(object):
                 if len(line):
                     # we read something, output the prompt and the something
                     if self.echo:
-                        self.poutput('{}{}'.format(prompt, line))
+                        self.poutput('{}{}'.format(msg, line))
                 else:
                     line = 'eof'
 
@@ -2383,7 +2384,7 @@ class Cmd(object):
 
     # Preserve quotes since we are passing strings to other commands
     @with_argparser(alias_parser, preserve_quotes=True)
-    def do_alias(self, args: argparse.Namespace) -> None:
+    def do_alias(self, args: Union[str, argparse.Namespace]) -> None:
         """Manage aliases"""
         func = getattr(args, 'func', None)
         if func is not None:
@@ -2586,7 +2587,7 @@ class Cmd(object):
 
     # Preserve quotes since we are passing strings to other commands
     @with_argparser(macro_parser, preserve_quotes=True)
-    def do_macro(self, args: argparse.Namespace) -> None:
+    def do_macro(self, args: Union[str, argparse.Namespace]) -> None:
         """Manage macros"""
         func = getattr(args, 'func', None)
         if func is not None:
@@ -2650,7 +2651,7 @@ class Cmd(object):
                              help="print a list of all commands with descriptions of each")
 
     @with_argparser(help_parser)
-    def do_help(self, args: argparse.Namespace) -> None:
+    def do_help(self, args: Union[str, argparse.Namespace]) -> None:
         """List available commands or provide detailed help for a specific command"""
         if not args.command or args.verbose:
             self._help_menu(args.verbose)
@@ -2681,8 +2682,7 @@ class Cmd(object):
                 self.decolorized_write(sys.stderr, "{}\n".format(err_msg))
 
     def _help_menu(self, verbose: bool = False) -> None:
-        """Show a list of commands which help can be displayed for.
-        """
+        """Show a list of commands which help can be displayed for."""
         # Get a sorted list of help topics
         help_topics = utils.alphabetical_sort(self.get_help_topics())
 
@@ -2806,19 +2806,19 @@ class Cmd(object):
                 self.stdout.write("\n")
 
     @with_argparser(ACArgumentParser())
-    def do_shortcuts(self, _: argparse.Namespace) -> None:
+    def do_shortcuts(self, _: Union[str, argparse.Namespace]) -> None:
         """List available shortcuts"""
         result = "\n".join('%s: %s' % (sc[0], sc[1]) for sc in sorted(self.shortcuts))
         self.poutput("Shortcuts for other commands:\n{}\n".format(result))
 
     @with_argparser(ACArgumentParser(epilog=INTERNAL_COMMAND_EPILOG))
-    def do_eof(self, _: argparse.Namespace) -> bool:
+    def do_eof(self, _: Union[str, argparse.Namespace]) -> bool:
         """Called when <Ctrl>-D is pressed"""
         # End of script should not exit app, but <Ctrl>-D should.
         return self._STOP_AND_EXIT
 
     @with_argparser(ACArgumentParser())
-    def do_quit(self, _: argparse.Namespace) -> bool:
+    def do_quit(self, _: Union[str, argparse.Namespace]) -> bool:
         """Exit this application"""
         self._should_quit = True
         return self._STOP_AND_EXIT
@@ -2918,7 +2918,7 @@ class Cmd(object):
     set_parser.add_argument('value', nargs='?', help='the new value for settable')
 
     @with_argparser(set_parser)
-    def do_set(self, args: argparse.Namespace) -> None:
+    def do_set(self, args: Union[str, argparse.Namespace]) -> None:
         """Set a settable parameter or show current settings of parameters"""
 
         # Check if param was passed in
@@ -2961,7 +2961,7 @@ class Cmd(object):
 
     # Preserve quotes since we are passing these strings to the shell
     @with_argparser(shell_parser, preserve_quotes=True)
-    def do_shell(self, args: argparse.Namespace) -> None:
+    def do_shell(self, args: Union[str, argparse.Namespace]) -> None:
         """Execute a command as if at the OS prompt"""
         import subprocess
 
@@ -3036,7 +3036,7 @@ class Cmd(object):
 
     # Preserve quotes since we are passing these strings to Python
     @with_argparser(py_parser, preserve_quotes=True)
-    def do_py(self, args: argparse.Namespace) -> bool:
+    def do_py(self, args: Union[str, argparse.Namespace]) -> bool:
         """Invoke Python command or shell"""
         from .pyscript_bridge import PyscriptBridge, CommandResult
         if self._in_py:
@@ -3105,8 +3105,8 @@ class Cmd(object):
 
             # If there are no args, then we will open an interactive Python console
             else:
-                from .rl_utils import rl_type, RlType, readline
                 # Set up readline for Python console
+                saved_readline = None
                 if rl_type != RlType.NONE:
 
                     # Restore py's history
@@ -3122,7 +3122,6 @@ class Cmd(object):
                             if 'gnureadline' in sys.modules:
                                 # rlcompleter imports readline by name, so it won't use gnureadline
                                 # Force rlcompleter to use gnureadline instead so it has our settings and history
-                                saved_readline = None
                                 if 'readline' in sys.modules:
                                     saved_readline = sys.modules['readline']
 
@@ -3196,7 +3195,7 @@ class Cmd(object):
             ACTION_ARG_CHOICES, ('path_complete',))
 
     @with_argparser(pyscript_parser)
-    def do_pyscript(self, args: argparse.Namespace) -> bool:
+    def do_pyscript(self, args: Union[str, argparse.Namespace]) -> bool:
         """Run a Python script file inside the console"""
         script_path = os.path.expanduser(args.script_path)
         py_return = False
@@ -3224,7 +3223,7 @@ class Cmd(object):
     # Only include the do_ipy() method if IPython is available on the system
     if ipython_available:  # pragma: no cover
         @with_argparser(ACArgumentParser())
-        def do_ipy(self, _: argparse.Namespace) -> None:
+        def do_ipy(self, _: Union[str, argparse.Namespace]) -> None:
             """Enter an interactive IPython shell"""
             from .pyscript_bridge import PyscriptBridge
             bridge = PyscriptBridge(self)
@@ -3275,8 +3274,9 @@ class Cmd(object):
                         "/regex/             items matching regular expression")
     history_parser.add_argument('arg', nargs='?', help=history_arg_help)
 
+    # TODO: comment this
     @with_argparser(history_parser)
-    def do_history(self, args: argparse.Namespace) -> None:
+    def do_history(self, args: Union[str, argparse.Namespace]) -> None:
         """View, run, edit, save, or clear previously entered commands"""
 
         # -v must be used alone with no other options
@@ -3457,7 +3457,7 @@ class Cmd(object):
             ACTION_ARG_CHOICES, ('path_complete',))
 
     @with_argparser(edit_parser)
-    def do_edit(self, args: argparse.Namespace) -> None:
+    def do_edit(self, args: Union[str, argparse.Namespace]) -> None:
         """Edit a file in a text editor"""
         if not self.editor:
             raise EnvironmentError("Please use 'set editor' to specify your text editing program of choice.")
@@ -3477,7 +3477,7 @@ class Cmd(object):
             return None
 
     @with_argparser(ACArgumentParser(epilog=INTERNAL_COMMAND_EPILOG))
-    def do_eos(self, _: argparse.Namespace) -> None:
+    def do_eos(self, _: Union[str, argparse.Namespace]) -> None:
         """Handle cleanup when a script has finished executing"""
         if self._script_dir:
             self._script_dir.pop()
@@ -3503,7 +3503,7 @@ class Cmd(object):
             ACTION_ARG_CHOICES, ('path_complete',))
 
     @with_argparser(load_parser)
-    def do_load(self, args: argparse.Namespace) -> None:
+    def do_load(self, args: Union[str, argparse.Namespace]) -> None:
         """Run commands in script file that is encoded as either ASCII or UTF-8 text"""
         expanded_path = os.path.abspath(os.path.expanduser(args.script_path))
 
@@ -3556,7 +3556,7 @@ class Cmd(object):
     relative_load_parser.add_argument('file_path', help='a file path pointing to a script')
 
     @with_argparser(relative_load_parser)
-    def do__relative_load(self, args: argparse.Namespace) -> None:
+    def do__relative_load(self, args: Union[str, argparse.Namespace]) -> None:
         """Run commands in script file that is encoded as either ASCII or UTF-8 text"""
         file_path = args.file_path
         # NOTE: Relative path is an absolute path, it is just relative to the current script directory
@@ -3583,6 +3583,7 @@ class Cmd(object):
         runner = unittest.TextTestRunner()
         runner.run(testcase)
 
+    # TODO: look at this
     def async_alert(self, alert_msg: str, new_prompt: Optional[str] = None) -> None:  # pragma: no cover
         """
         Display an important message to the user while they are at the prompt in between commands.
@@ -3631,6 +3632,7 @@ class Cmd(object):
         else:
             raise RuntimeError("another thread holds terminal_lock")
 
+    # TODO: look at this
     def async_update_prompt(self, new_prompt: str) -> None:  # pragma: no cover
         """
         Update the prompt while the user is still typing at it. This is good for alerting the user to system
@@ -3806,10 +3808,9 @@ class Cmd(object):
         # Grab terminal lock before the prompt has been drawn by readline
         self.terminal_lock.acquire()
 
-        # Always run the preloop first
+        # Always run the preloop hooks first
         for func in self._preloop_hooks:
             func()
-        self.preloop()
 
         # If transcript-based regression testing was requested, then do that instead of the main loop
         if self._transcript_files is not None:
@@ -3826,10 +3827,9 @@ class Cmd(object):
             # And then call _cmdloop() to enter the main loop
             self._cmdloop()
 
-        # Run the postloop() no matter what
+        # Run the postloop hooks no matter what
         for func in self._postloop_hooks:
             func()
-        self.postloop()
 
         # Release terminal lock now that postloop code should have stopped any terminal updater threads
         # This will also zero the lock count in case cmdloop() is called again
